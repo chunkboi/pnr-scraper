@@ -5,6 +5,8 @@ the Indian Railways enquiry portal. Built in Rust with statically linked
 Tesseract OCR for captcha solving — the release binary has **no runtime
 dependencies** beyond standard Windows system DLLs.
 
+[![CodeQL](https://github.com/chunkboi/pnr-scraper/actions/workflows/codeql.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/codeql.yml)
+[![Dependabot](https://badgen.net/badge/Dependabot/enabled/green)](https://github.com/chunkboi/pnr-scraper)
 ---
 
 ## Features
