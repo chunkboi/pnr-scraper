@@ -9,7 +9,7 @@ dependencies** beyond standard Windows system DLLs.
 [![Dependabot](https://badgen.net/badge/Dependabot/enabled/green)](https://github.com/chunkboi/pnr-scraper)
 [![DevSkim](https://github.com/chunkboi/pnr-scraper/actions/workflows/devskim.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/devskim.yml)
 [![CodeFactor](https://www.codefactor.io/repository/github/chunkboi/pnr-scraper/badge)](https://www.codefactor.io/repository/github/chunkboi/pnr-scraper)
-[![OSSAR](https://github.com/chunkboi/pnr-scraper/actions/workflows/ossar.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/ossar.yml)
+
 ---
 
 ## Features
