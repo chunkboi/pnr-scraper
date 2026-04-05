@@ -329,7 +329,7 @@ pub fn solve_captcha(img_bytes: &[u8], verbose: bool) -> Option<i64> {
 fn ensure_tessdata() -> &'static PathBuf {
     TESSDATA_PATH.get_or_init(|| {
         let mut path = std::env::temp_dir();
-        path.push("pnr_scraper_tessdata");
+        path.push("pnr-scraper-tessdata");
 
         if !path.exists() {
             if let Err(e) = std::fs::create_dir_all(&path) {

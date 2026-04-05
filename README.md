@@ -1,4 +1,4 @@
-# 🚆 scraper_rs — Indian Railways PNR Status Checker
+# 🚆 pnr-scraper — Indian Railways PNR Status Checker
 
 A fast, fully self-contained Windows CLI tool that fetches live PNR status from
 the Indian Railways enquiry portal. Built in Rust with statically linked
@@ -20,7 +20,7 @@ dependencies** beyond standard Windows system DLLs.
   status, and a probability bar for WL predictions
 - **JSON export** — optionally writes structured output to a `.json` file
 - **Single binary** — everything (Tesseract model, OCR engine, TLS, HTTP
-  client) is statically linked; copy `scraper_rs.exe` anywhere and it works
+  client) is statically linked; copy `pnr-scraper.exe` anywhere and it works
 
 ---
 
@@ -34,7 +34,7 @@ dependencies** beyond standard Windows system DLLs.
 | Git | Needed by `setup.ps1` to clone vcpkg |
 
 > **Note:** You only need Rust/MSVC/Git to *build* the project. The compiled
-> `scraper_rs.exe` binary runs on any 64-bit Windows machine with no extra
+> `pnr-scraper.exe` binary runs on any 64-bit Windows machine with no extra
 > software installed.
 
 ---
@@ -44,8 +44,8 @@ dependencies** beyond standard Windows system DLLs.
 ### 1 — Clone the repo
 
 ```powershell
-git clone https://github.com/chunkboi/scraper_rs.git
-cd scraper_rs
+git clone https://github.com/chunkboi/pnr-scraper.git
+cd pnr-scraper
 ```
 
 ### 2 — Bootstrap the native build dependencies
@@ -72,14 +72,14 @@ on first run.
 cargo build --release
 ```
 
-The finished binary is at `target\release\scraper_rs.exe`.
+The finished binary is at `target\release\pnr-scraper.exe`.
 
 ---
 
 ## Usage
 
 ```
-scraper_rs [OPTIONS]
+pnr-scraper [OPTIONS]
 
 Options:
   -p, --pnr <PNR>        10-digit PNR number
@@ -95,16 +95,16 @@ Options:
 
 ```powershell
 # Interactive — prompts for PNR
-scraper_rs.exe
+pnr-scraper.exe
 
 # Pass PNR directly
-scraper_rs.exe --pnr 1234567890
+pnr-scraper.exe --pnr 1234567890
 
 # Export to JSON
-scraper_rs.exe --pnr 1234567890 --export status.json
+pnr-scraper.exe --pnr 1234567890 --export status.json
 
 # Show raw API response + verbose debug output
-scraper_rs.exe --pnr 1234567890 --show-json --verbose
+pnr-scraper.exe --pnr 1234567890 --show-json --verbose
 ```
 
 ### Sample output
@@ -182,7 +182,7 @@ Windows installation.
 ## Project Structure
 
 ```
-scraper_rs/
+pnr-scraper/
 ├── src/
 │   ├── main.rs       # CLI argument parsing, top-level orchestration
 │   ├── api.rs        # HTTP client, session management, fetch-retry loop

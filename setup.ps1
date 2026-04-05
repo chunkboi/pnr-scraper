@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Bootstrap the build environment for scraper_rs.
+    Bootstrap the build environment for pnr-scraper.
 
 .DESCRIPTION
     1. Clones the microsoft/vcpkg repository into ./vcpkg_tools (if absent).
@@ -179,6 +179,6 @@ Write-Host "  Setup complete!  Build the release binary with:" -ForegroundColor 
 Write-Host ""
 Write-Host "      cargo build --release" -ForegroundColor White
 Write-Host ""
-Write-Host "  The binary will be at:  target\release\scraper_rs.exe" -ForegroundColor DarkGray
+Write-Host "  The binary will be at:  target\release\pnr-scraper.exe" -ForegroundColor DarkGray
 Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Green
 Write-Host ""
