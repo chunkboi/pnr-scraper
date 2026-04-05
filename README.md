@@ -6,6 +6,8 @@ Tesseract OCR for captcha solving — the release binary has **no runtime
 dependencies** beyond standard Windows system DLLs.
 
 [![CodeQL](https://github.com/chunkboi/pnr-scraper/actions/workflows/codeql.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/codeql.yml)
+[![Rust Quality](https://github.com/chunkboi/pnr-scraper/actions/workflows/rust-quality.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/rust-quality.yml)
+[![Security Audit](https://github.com/chunkboi/pnr-scraper/actions/workflows/security-audit.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/security-audit.yml)
 [![Dependabot](https://badgen.net/badge/Dependabot/enabled/green)](https://github.com/chunkboi/pnr-scraper)
 ---
 
