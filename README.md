@@ -7,6 +7,7 @@ dependencies** beyond standard Windows system DLLs.
 
 [![CodeQL](https://github.com/chunkboi/pnr-scraper/actions/workflows/codeql.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/codeql.yml)
 [![Dependabot](https://badgen.net/badge/Dependabot/enabled/green)](https://github.com/chunkboi/pnr-scraper)
+[![DevSkim](https://github.com/chunkboi/pnr-scraper/actions/workflows/devskim.yml/badge.svg)](https://github.com/chunkboi/pnr-scraper/actions/workflows/devskim.yml)
 ---
 
 ## Features
