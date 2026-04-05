@@ -1,0 +1,13 @@
+# Force vcpkg-rs to use the static-MD triplet on Windows so that
+# Tesseract and Leptonica (and all their transitive deps) are linked
+# statically into the binary.  The resulting .exe will only depend on
+# standard Windows / MSVC-CRT DLLs that ship with every modern Windows
+# install — no tesseract55.dll / leptonica-1.87.0.dll needed at runtime.
+[env]
+VCPKGRS_TRIPLET = "x64-windows-static-md"
+
+# Point the vcpkg crate at the local vcpkg_tools directory.
+# `relative = true` resolves the path relative to this config file's
+# location (the repo root), so the build works regardless of where
+# the repo is cloned.  Run setup.ps1 once to populate vcpkg_tools/.
+VCPKG_ROOT = { value = "vcpkg_tools", relative = true }

@@ -1,0 +1,40 @@
+# ── Rust build output ────────────────────────────────────────────────
+/target/
+
+# ── vcpkg installation (1 GB+ of compiled libraries and build trees) ─
+# Run setup.ps1 to recreate this directory locally.
+vcpkg_tools/
+
+# ── Scratch / debug text files ────────────────────────────────────────
+check.txt
+compile_errors.txt
+out.txt
+raw_output.txt
+
+# ── Windows ───────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# ── Editor / IDE ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Secrets / local overrides ─────────────────────────────────────────
+.env
+.env.local
+
+# ── Session / UA cache written at runtime ────────────────────────────
+# (these live in the user home dir, but just in case)
+.pnr_session.json
+.pnr_ua_cache.json
