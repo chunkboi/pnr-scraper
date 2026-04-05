@@ -38,3 +38,9 @@ $RECYCLE.BIN/
 # (these live in the user home dir, but just in case)
 .pnr_session.json
 .pnr_ua_cache.json
+
+#  Certificates / signing 
+*.pfx
+*.cer
+*.p12
+*.snk

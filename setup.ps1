@@ -130,6 +130,31 @@ foreach ($pkg in $packages) {
     Write-Ok "$pkg installed"
 }
 
+# ── Download Tesseract eng.traineddata ───────────────────────────────────────
+
+Write-Step "Downloading Tesseract eng.traineddata"
+
+$tessUrl  = "https://github.com/tesseract-ocr/tessdata_fast/raw/main/eng.traineddata"
+$tessDir  = Join-Path $PSScriptRoot "tessdata"
+$tessFile = Join-Path $tessDir "eng.traineddata"
+
+New-Item -ItemType Directory -Force -Path $tessDir | Out-Null
+
+$minSize = 3MB
+if ((Test-Path $tessFile) -and (Get-Item $tessFile).Length -ge $minSize) {
+    Write-Ok "Already present: $tessFile ($([Math]::Round((Get-Item $tessFile).Length / 1MB, 1)) MB)"
+} else {
+    Write-Host "    Downloading from $tessUrl ..." -ForegroundColor DarkCyan
+    try {
+        Invoke-WebRequest -Uri $tessUrl -OutFile $tessFile -UseBasicParsing
+        Write-Ok "Saved to $tessFile ($([Math]::Round((Get-Item $tessFile).Length / 1MB, 1)) MB)"
+    } catch {
+        Write-Host "ERROR: Failed to download eng.traineddata: $_" -ForegroundColor Red
+        Write-Host "       Manually place it at: $tessFile" -ForegroundColor Red
+        exit 1
+    }
+}
+
 # ── System integration ────────────────────────────────────────────────────────
 
 if ($SkipIntegrate) {
