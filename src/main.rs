@@ -47,10 +47,9 @@ async fn main() -> anyhow::Result<()> {
         pnr = Some(input.trim().to_string());
     }
 
-    let pnr = pnr.unwrap();
+    let pnr = pnr.ok_or_else(|| anyhow::anyhow!("PNR was not provided or input failed."))?;
     if pnr.len() != 10 || !pnr.chars().all(char::is_numeric) {
-        eprintln!("{}", "Invalid PNR. Must be exactly 10 digits.".red());
-        std::process::exit(1);
+        anyhow::bail!("Invalid PNR. Must be exactly 10 digits.");
     }
 
     println!(
@@ -77,9 +76,13 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    let raw = result.raw.unwrap();
+    let raw = result
+        .raw
+        .ok_or_else(|| anyhow::anyhow!("API response did not contain raw JSON data"))?;
     let pred = result.prediction.as_ref();
-    let mapped = result.mapped.unwrap();
+    let mapped = result
+        .mapped
+        .ok_or_else(|| anyhow::anyhow!("API response could not be mapped to structured data"))?;
 
     if args.show_json {
         let mut payload = serde_json::Map::new();
@@ -93,7 +96,11 @@ async fn main() -> anyhow::Result<()> {
             "─".repeat(62).dimmed(),
             "─".repeat(62).dimmed()
         );
-        println!("{}", serde_json::to_string_pretty(&merged).unwrap());
+        if let Ok(pretty_json) = serde_json::to_string_pretty(&merged) {
+            println!("{}", pretty_json);
+        } else {
+            eprintln!("  {} Failed to format JSON output", "✗".red());
+        }
     }
 
     ui::display(&raw, result.elapsed, pred);
@@ -102,33 +109,30 @@ async fn main() -> anyhow::Result<()> {
         let mut out_data = serde_json::Map::new();
         out_data.insert(
             "pnr_status".to_string(),
-            serde_json::to_value(&mapped).unwrap(),
+            serde_json::to_value(&mapped).unwrap_or(serde_json::Value::Null),
         );
         if let Some(p) = pred {
             out_data.insert("prediction".to_string(), p.clone().clone());
         }
 
-        match std::fs::write(
-            &export_path,
-            serde_json::to_string_pretty(&serde_json::Value::Object(out_data)).unwrap(),
-        ) {
-            Ok(_) => {
-                println!(
-                    "  {} Mapped data exported to {}\n",
-                    "✓".green(),
-                    export_path.bold()
-                );
-            }
+        match serde_json::to_string_pretty(&serde_json::Value::Object(out_data)) {
+            Ok(json_str) => match std::fs::write(&export_path, json_str) {
+                Ok(_) => {
+                    println!(
+                        "  {} Mapped data exported to {}\n",
+                        "✓".green(),
+                        export_path.bold()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  {} Export failed: {}\n", "✗".red(), e);
+                }
+            },
             Err(e) => {
-                eprintln!("  {} Export failed: {}\n", "✗".red(), e);
+                eprintln!("  {} Failed to serialize export data: {}\n", "✗".red(), e);
             }
         }
     }
-
-    // Drop the thread-local Tesseract engine before process exit so that
-    // Tesseract's ObjectCache singleton is still alive when the reference
-    // counts are released — suppresses the "WARNING! LEAK!" dawg messages.
-    captcha::cleanup();
 
     Ok(())
 }

@@ -72,7 +72,12 @@ async fn get_latest_user_agent() -> String {
         ua: ua.clone(),
         ts: now_sec(),
     };
-    let _ = std::fs::write(&path, serde_json::to_string(&cache).unwrap());
+    if let Err(e) = std::fs::write(&path, serde_json::to_string(&cache).unwrap()) {
+        eprintln!(
+            "  \x1b[90m▸\x1b[0m \x1b[91m[WARN    ]\x1b[0m Failed to cache User-Agent to disk: {}",
+            e
+        );
+    }
     ua
 }
 
@@ -94,6 +99,7 @@ struct AppState {
 
 pub struct ApiClient {
     state: Arc<Mutex<AppState>>,
+    ocr: Arc<captcha::OcrHandle>,
     verbose: bool,
 }
 
@@ -103,16 +109,18 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub async fn new(verbose: bool) -> Self {
-        let ua = get_latest_user_agent().await;
         let jar = Arc::new(reqwest::cookie::Jar::default());
-        ApiClient {
-            state: Arc::new(Mutex::new(AppState {
-                jar,
-                client: None,
-                session_ts: 0.0,
-                ua,
-                cookies: HashMap::new(),
-            })),
+        let state = AppState {
+            jar,
+            client: None,
+            session_ts: 0.0,
+            ua: get_latest_user_agent().await,
+            cookies: HashMap::new(),
+        };
+
+        Self {
+            state: Arc::new(Mutex::new(state)),
+            ocr: Arc::new(captcha::OcrHandle::new(verbose)),
             verbose,
         }
     }
@@ -146,7 +154,10 @@ impl ApiClient {
     /// directly into the jar so the pool stays warm.
     fn build_client(ua: &str, jar: Arc<reqwest::cookie::Jar>) -> reqwest::Client {
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_str(ua).unwrap());
+        // Never blindly trust disk cache. Fallback gracefully instead of panicking on invalid strings.
+        let fallback_ua = HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36");
+        let ua_header = HeaderValue::from_str(ua).unwrap_or(fallback_ua);
+        headers.insert(USER_AGENT, ua_header);
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/json, text/javascript, */*; q=0.01"),
@@ -203,9 +214,13 @@ impl ApiClient {
                 .collect(),
             ts,
         };
-        if let Ok(data) = serde_json::to_string(&cache) {
-            let _ = std::fs::write(&path, data);
-        }
+        if let Ok(data) = serde_json::to_string(&cache)
+            && let Err(e) = std::fs::write(&path, data) {
+                eprintln!(
+                    "  \x1b[90m▸\x1b[0m \x1b[91m[WARN    ]\x1b[0m Failed to save session cookies to disk: {}",
+                    e
+                );
+            }
     }
 
     fn load_session() -> Option<(HashMap<String, String>, f64)> {
@@ -567,7 +582,7 @@ impl ApiClient {
                     }
                 };
 
-                match captcha::solve_captcha(&bytes, self.verbose) {
+                match self.ocr.solve(bytes).await {
                     Some(ans) => captcha_answer = Some(ans.to_string()),
                     None => continue,
                 }
@@ -734,21 +749,22 @@ impl ApiClient {
             .run_fetch_loop(needs_captcha, "PNR", Some(pnr), &progress, prefetched_img)
             .await;
 
-        if result.is_none() {
-            return PnrResult {
-                success: false,
-                error: Some(format!(
-                    "Failed to solve captcha after {} attempts.",
-                    MAX_CAPTCHA_RETRIES
-                )),
-                raw: None,
-                mapped: None,
-                prediction: None,
-                elapsed: t_start.elapsed().as_secs_f64(),
-            };
-        }
-
-        let raw = result.unwrap();
+        let raw = match result {
+            Some(value) => value,
+            None => {
+                return PnrResult {
+                    success: false,
+                    error: Some(format!(
+                        "Failed to solve captcha after {} attempts.",
+                        MAX_CAPTCHA_RETRIES
+                    )),
+                    raw: None,
+                    mapped: None,
+                    prediction: None,
+                    elapsed: t_start.elapsed().as_secs_f64(),
+                };
+            }
+        };
         if let Some(err) = raw.get("__error__").and_then(|v| v.as_str()) {
             return PnrResult {
                 success: false,

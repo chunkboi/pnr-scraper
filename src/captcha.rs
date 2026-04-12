@@ -1,10 +1,11 @@
+use bytes::Bytes;
 use image::{imageops::FilterType, DynamicImage, GrayImage, ImageBuffer, Luma};
 use regex::Regex;
-use std::cell::RefCell;
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::{LazyLock, OnceLock};
 use tesseract_plumbing::TessBaseApi;
+use tokio::sync::{mpsc, oneshot};
 
 const ENG_TRAINEDDATA: &[u8] = include_bytes!("../tessdata/eng.traineddata");
 
@@ -26,9 +27,78 @@ static RE_CAPTCHA: LazyLock<Regex> =
 /// Cached tessdata directory path — filesystem work happens only once per process.
 static TESSDATA_PATH: OnceLock<PathBuf> = OnceLock::new();
 
-// Per-thread Tesseract instance: initialised once per thread, reused forever.
-thread_local! {
-    static TESS: RefCell<Option<TessBaseApi>> = const { RefCell::new(None) };
+pub struct OcrHandle {
+    tx: Option<mpsc::Sender<OcrTask>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+struct OcrTask {
+    img_bytes: Bytes,
+    resp: oneshot::Sender<Option<i64>>,
+}
+
+impl OcrHandle {
+    pub fn new(verbose: bool) -> Self {
+        let (tx, mut rx) = mpsc::channel::<OcrTask>(32);
+
+        // Spawn a dedicated OS thread for the C++ TessBaseApi to ensure RAII
+        // and predictable destruction upon `main()` exit when `tx` drops.
+        let worker = std::thread::spawn(move || {
+            let tessdata_path = ensure_tessdata();
+            let mut tess = TessBaseApi::create();
+            let datapath_c = CString::new(tessdata_path.to_string_lossy().as_bytes())
+                .expect("FATAL: Invalid datapath for Tesseract");
+            let lang_c = CString::new("eng").unwrap();
+            
+            if tess.init_2(Some(&datapath_c), Some(&lang_c)).is_err() {
+                panic!("FATAL: Tesseract failed to initialize. The eng.traineddata file at {:?} is missing or corrupted.", tessdata_path);
+            }
+            
+            let whitelist = CString::new("tessedit_char_whitelist").unwrap();
+            let chars = CString::new("0123456789+-").unwrap();
+            let _ = tess.set_variable(&whitelist, &chars);
+            let psm_name = CString::new("tessedit_pageseg_mode").unwrap();
+            let psm_val = CString::new("7").unwrap();
+            let _ = tess.set_variable(&psm_name, &psm_val);
+
+            // Sync OS thread pulling from Tokio channel safely via blocking_recv
+            while let Some(task) = rx.blocking_recv() {
+                let res = solve_captcha_sync(&mut tess, &task.img_bytes, verbose);
+                let _ = task.resp.send(res);
+            }
+        });
+
+        Self {
+            tx: Some(tx),
+            worker: Some(worker),
+        }
+    }
+
+    pub async fn solve(&self, img_bytes: Bytes) -> Option<i64> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let task = OcrTask {
+            img_bytes,
+            resp: resp_tx,
+        };
+        // If the queue is full it yields back to tokio. If the receiver dropped, it returns gracefully.
+        if let Some(tx) = &self.tx
+            && tx.send(task).await.is_ok() {
+                return resp_rx.await.unwrap_or(None);
+            }
+        None
+    }
+}
+
+impl Drop for OcrHandle {
+    fn drop(&mut self) {
+        // Drop the transmitter explicitly which unblocks the rx.blocking_recv()
+        self.tx.take();
+        // Wait for the worker thread to naturally finish executing its loop
+        // and smoothly Drop the C++ engine bounds.
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 // Character substitution map matching the Python _CHAR_MAP
@@ -157,84 +227,53 @@ fn preprocess_base(img: &DynamicImage) -> GrayImage {
 // Zero-copy OCR via tesseract-plumbing raw pixel API
 // =============================================================================
 
-fn ocr_in_memory(bin_img: &GrayImage, _psm: i32, verbose: bool, label: &str) -> Option<i64> {
+fn ocr_in_memory(
+    tess: &mut TessBaseApi,
+    bin_img: &GrayImage,
+    _psm: i32,
+    verbose: bool,
+    label: &str,
+) -> Option<i64> {
     let t = std::time::Instant::now();
 
     let (width, height) = bin_img.dimensions();
     let raw_pixels = bin_img.as_raw();
 
-    // Retrieve the (already-written) tessdata dir — no filesystem work after first call.
-    let tessdata_path = ensure_tessdata();
-
-    // Access the per-thread TessBaseApi instance, initialising it exactly once per thread.
-    let result = TESS.with(|cell| {
-        let mut opt = cell.borrow_mut();
-
-        if opt.is_none() {
-            let mut api = TessBaseApi::create();
-            let datapath_c = CString::new(tessdata_path.to_string_lossy().as_bytes()).ok()?;
-            let lang_c = CString::new("eng").unwrap();
-            if api.init_2(Some(&datapath_c), Some(&lang_c)).is_err() {
-                if verbose {
-                    eprintln!(
-                        "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} tess init error",
-                        label
-                    );
-                }
-                return None;
-            }
-            let whitelist = CString::new("tessedit_char_whitelist").unwrap();
-            let chars = CString::new("0123456789+-*").unwrap();
-            let _ = api.set_variable(&whitelist, &chars);
-            let psm_name = CString::new("tessedit_pageseg_mode").unwrap();
-            let psm_val = CString::new("7").unwrap();
-            let _ = api.set_variable(&psm_name, &psm_val);
-            *opt = Some(api);
+    // ZERO-COPY: feed raw grayscale pixels directly to Tesseract.
+    // No PNG encode → decode round-trip. The GrayImage buffer is
+    // contiguous 1-byte-per-pixel data with no padding, exactly what
+    // TessBaseAPISetImage expects.
+    if let Err(e) = tess.set_image(
+        raw_pixels,
+        width as i32,
+        height as i32,
+        1,                // bytes_per_pixel (grayscale)
+        width as i32,     // bytes_per_line  (no row padding)
+    ) {
+        if verbose {
+            eprintln!(
+                "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} tess set_image error: {:?}",
+                label, e
+            );
         }
+        return None;
+    }
 
-        let tess = opt.as_mut().unwrap();
+    // Set source resolution to suppress "Warning: Invalid resolution 0 dpi"
+    tess.set_source_resolution(72);
 
-        // ZERO-COPY: feed raw grayscale pixels directly to Tesseract.
-        // No PNG encode → decode round-trip. The GrayImage buffer is
-        // contiguous 1-byte-per-pixel data with no padding, exactly what
-        // TessBaseAPISetImage expects.
-        if let Err(e) = tess.set_image(
-            raw_pixels,
-            width as i32,
-            height as i32,
-            1,                // bytes_per_pixel (grayscale)
-            width as i32,     // bytes_per_line  (no row padding)
-        ) {
+    let raw = match tess.get_utf8_text() {
+        Ok(text) => text.as_ref().to_string_lossy().trim().to_string(),
+        Err(_) => {
             if verbose {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} tess set_image error: {:?}",
-                    label, e
+                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} tess get_utf8_text error",
+                    label
                 );
             }
             return None;
         }
-
-        // Set source resolution to suppress "Warning: Invalid resolution 0 dpi"
-        tess.set_source_resolution(72);
-
-        match tess.get_utf8_text() {
-            Ok(text) => {
-                let s = text.as_ref().to_string_lossy().trim().to_string();
-                Some(s)
-            }
-            Err(_) => {
-                if verbose {
-                    eprintln!(
-                        "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} tess get_utf8_text error",
-                        label
-                    );
-                }
-                None
-            }
-        }
-    });
-
-    let raw = result?;
+    };
     let text = apply_char_map(&raw);
     let elapsed_ms = t.elapsed().as_millis();
 
@@ -274,7 +313,7 @@ fn ocr_in_memory(bin_img: &GrayImage, _psm: i32, verbose: bool, label: &str) -> 
     }
 }
 
-pub fn solve_captcha(img_bytes: &[u8], verbose: bool) -> Option<i64> {
+fn solve_captcha_sync(tess: &mut TessBaseApi, img_bytes: &[u8], verbose: bool) -> Option<i64> {
     let t_start = std::time::Instant::now();
 
     let dyn_img = match image::load_from_memory(img_bytes) {
@@ -294,7 +333,7 @@ pub fn solve_captcha(img_bytes: &[u8], verbose: bool) -> Option<i64> {
 
     // Fast path: threshold=128, psm=7
     let fast_bin = binarize(&base, FAST_THRESHOLD);
-    if let Some(r) = ocr_in_memory(&fast_bin, 7, verbose, "fast  thresh=128") {
+    if let Some(r) = ocr_in_memory(tess, &fast_bin, 7, verbose, "fast  thresh=128") {
         if verbose {
             eprintln!(
                 "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Solved via fast path in {}ms",
@@ -304,11 +343,11 @@ pub fn solve_captcha(img_bytes: &[u8], verbose: bool) -> Option<i64> {
         return Some(r);
     }
 
-    // Fallback sequential grid — thread-local Tess means no re-init cost per call.
+    // Fallback sequential grid
     for &threshold in FALLBACK_THRESHOLDS {
         let bin = binarize(&base, threshold);
         let label = format!("grid  thresh={}", threshold);
-        if let Some(res) = ocr_in_memory(&bin, 7, verbose, &label) {
+        if let Some(res) = ocr_in_memory(tess, &bin, 7, verbose, &label) {
             if verbose {
                 eprintln!(
                     "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Solved via fallback grid in {}ms",
@@ -359,11 +398,22 @@ fn ensure_tessdata() -> &'static PathBuf {
                 "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Extracting embedded eng.traineddata to {:?}...",
                 file_path
             );
-            if let Err(e) = std::fs::write(&file_path, ENG_TRAINEDDATA) {
+            let mut tmp_path = path.clone();
+            tmp_path.push(format!("eng.traineddata.{}.tmp", std::process::id()));
+            
+            if let Err(e) = std::fs::write(&tmp_path, ENG_TRAINEDDATA) {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Failed to write tessdata: {}",
+                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Failed to write tessdata to temp file: {}",
                     e
                 );
+            } else {
+                // Atomic rename guarantees other processes won't read a half-written file.
+                if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
+                    eprintln!(
+                        "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Failed to atomically rename tessdata: {}",
+                        e
+                    );
+                }
             }
         }
 
@@ -371,18 +421,4 @@ fn ensure_tessdata() -> &'static PathBuf {
         // Tesseract 5.x resolves:  datapath + "/" + lang + ".traineddata"
         path
     })
-}
-
-/// Explicitly drop the thread-local Tesseract engine.
-///
-/// Tesseract keeps an internal process-wide `ObjectCache` (a static singleton).
-/// If the thread-local `TessBaseApi` is still alive when that singleton's destructor
-/// runs at process exit, Tesseract prints "WARNING! LEAK!" for every dawg object
-/// it loaded.  Calling this function before returning from `main` ensures the
-/// engine is torn down — and its reference counts released — while `ObjectCache`
-/// is still intact.
-pub fn cleanup() {
-    TESS.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
 }
