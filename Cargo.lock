@@ -1042,16 +1042,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
-name = "leptess"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae8964e3d3270be667dda2d0026e8c77011bafaad33936011b93750489987513"
-dependencies = [
- "tesseract-plumbing",
- "thiserror",
-]
-
-[[package]]
 name = "leptonica-plumbing"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1362,11 +1352,11 @@ dependencies = [
  "dirs",
  "futures",
  "image",
- "leptess",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "tesseract-plumbing",
  "tokio",
 ]
 

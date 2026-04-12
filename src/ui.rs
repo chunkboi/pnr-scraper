@@ -80,7 +80,7 @@ fn parse_ts(v: &serde_json::Value) -> String {
         let hour = ts.get("hour").and_then(|v| v.as_u64()).unwrap_or(0);
         let minute = ts.get("minute").and_then(|v| v.as_u64()).unwrap_or(0);
         let second = ts.get("second").and_then(|v| v.as_u64()).unwrap_or(0);
-        let month_idx = if month >= 1 && month <= 12 { month - 1 } else { 0 };
+        let month_idx = if (1..=12).contains(&month) { month - 1 } else { 0 };
         format!(
             "{:02}-{}-{} [{:02}:{:02}:{:02} IST]",
             day, MONTHS[month_idx], year, hour, minute, second
@@ -91,13 +91,11 @@ fn parse_ts(v: &serde_json::Value) -> String {
 }
 
 fn parse_jdate(val: Option<&serde_json::Value>) -> String {
-    if let Some(v) = val {
-        if let Some(num) = v.as_i64() {
-            if let chrono::LocalResult::Single(dt) = chrono::TimeZone::timestamp_opt(&chrono::Utc, num / 1000, 0) {
+    if let Some(v) = val
+        && let Some(num) = v.as_i64()
+            && let chrono::LocalResult::Single(dt) = chrono::TimeZone::timestamp_opt(&chrono::Utc, num / 1000, 0) {
                 return dt.format("%d-%b-%Y").to_string();
             }
-        }
-    }
     "-".to_string()
 }
 
@@ -113,11 +111,10 @@ pub fn extract_fare(v: &serde_json::Value) -> String {
                     }
                 }
                 serde_json::Value::Number(n) => {
-                    if let Some(f) = n.as_f64() {
-                        if f > 0.0 {
+                    if let Some(f) = n.as_f64()
+                        && f > 0.0 {
                             return n.to_string();
                         }
-                    }
                 }
                 _ => {}
             }
@@ -150,8 +147,8 @@ pub fn display(raw_resp: &serde_json::Value, elapsed: f64, pred: Option<&serde_j
     sep();
 
     // ── Passenger Status ────────────────────────────────────────────
-    if let Some(passengers) = raw_resp.get("passengerList").and_then(|v| v.as_array()) {
-        if !passengers.is_empty() {
+    if let Some(passengers) = raw_resp.get("passengerList").and_then(|v| v.as_array())
+        && !passengers.is_empty() {
             let n = passengers.len();
             let p_word = if n > 1 { "passengers" } else { "passenger" };
             println!(
@@ -204,7 +201,6 @@ pub fn display(raw_resp: &serde_json::Value, elapsed: f64, pred: Option<&serde_j
             }
             sep();
         }
-    }
 
     // ── Fare & Charting ─────────────────────────────────────────────
     let fare = extract_fare(raw_resp);
@@ -247,8 +243,8 @@ pub fn display(raw_resp: &serde_json::Value, elapsed: f64, pred: Option<&serde_j
                 prob_bar(prob, 28)
             );
         }
-        if let Some(wl_list) = p_data.get("maxWlRacCnfList").and_then(|v| v.as_array()) {
-            if !wl_list.is_empty() {
+        if let Some(wl_list) = p_data.get("maxWlRacCnfList").and_then(|v| v.as_array())
+            && !wl_list.is_empty() {
                 println!("  {}", "│".blue());
                 println!(
                     "  {}  {: <16}{}",
@@ -272,7 +268,6 @@ pub fn display(raw_resp: &serde_json::Value, elapsed: f64, pred: Option<&serde_j
                     );
                 }
             }
-        }
         sep();
     }
 

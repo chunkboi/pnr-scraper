@@ -5,6 +5,9 @@
 # Run setup.ps1 to recreate this directory locally.
 vcpkg_tools/
 
+# ── Dynamic runtime / downloaded dependencies ─────────────────────────
+tessdata/
+
 # ── Scratch / debug text files ────────────────────────────────────────
 check.txt
 compile_errors.txt

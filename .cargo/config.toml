@@ -11,3 +11,9 @@ VCPKGRS_TRIPLET = "x64-windows-static-md"
 # location (the repo root), so the build works regardless of where
 # the repo is cloned.  Run setup.ps1 once to populate vcpkg_tools/.
 VCPKG_ROOT = { value = "vcpkg_tools", relative = true }
+
+# Enable native CPU instruction set (AVX2, SSE4.2, etc.) for auto-
+# vectorisation of pixel processing loops.  Only safe when you build
+# and run on the same machine — the binary won't be portable.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=native"]
