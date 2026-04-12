@@ -5,8 +5,8 @@ use crate::models::{
 };
 use bytes::Bytes;
 use reqwest::header::{
-    HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, ORIGIN, REFERER,
-    SET_COOKIE, USER_AGENT,
+    HeaderMap, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, ORIGIN, REFERER, SET_COOKIE,
+    USER_AGENT,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -155,30 +155,14 @@ impl ApiClient {
     fn build_client(ua: &str, jar: Arc<reqwest::cookie::Jar>) -> reqwest::Client {
         let mut headers = HeaderMap::new();
         // Never blindly trust disk cache. Fallback gracefully instead of panicking on invalid strings.
-        let fallback_ua = HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/137.0.0.0");
+        let fallback_ua = HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36");
         let ua_header = HeaderValue::from_str(ua).unwrap_or(fallback_ua);
         headers.insert(USER_AGENT, ua_header);
         headers.insert(
             ACCEPT,
-            HeaderValue::from_static("*/*"),
+            HeaderValue::from_static("application/json, text/javascript, */*; q=0.01"),
         );
         headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
-        headers.insert(
-            HeaderName::from_static("x-requested-with"),
-            HeaderValue::from_static("XMLHttpRequest"),
-        );
-        headers.insert(
-            HeaderName::from_static("sec-fetch-dest"),
-            HeaderValue::from_static("empty"),
-        );
-        headers.insert(
-            HeaderName::from_static("sec-fetch-mode"),
-            HeaderValue::from_static("cors"),
-        );
-        headers.insert(
-            HeaderName::from_static("sec-fetch-site"),
-            HeaderValue::from_static("same-origin"),
-        );
         headers.insert(
             ACCEPT_ENCODING,
             HeaderValue::from_static("gzip, deflate, br"),
@@ -187,6 +171,10 @@ impl ApiClient {
         headers.insert(
             ORIGIN,
             HeaderValue::from_static("https://www.indianrail.gov.in"),
+        );
+        headers.insert(
+            "X-Requested-With",
+            HeaderValue::from_static("XMLHttpRequest"),
         );
 
         reqwest::Client::builder()
@@ -605,14 +593,14 @@ impl ApiClient {
                 ));
             }
 
-            let captcha_str = captcha_answer.unwrap_or_default();
-            let mut params = vec![("inputCaptcha", captcha_str.as_str())];
+            let mut params = vec![("inputPage", input_page), ("language", "en")];
             if let Some(pnr) = pnr_number {
                 params.push(("inputPnrNo", pnr));
             }
-            params.push(("inputPage", input_page));
-            params.push(("facnam", input_page));
-            params.push(("language", "en"));
+            let ans_str = captcha_answer.unwrap_or_default();
+            if needs_captcha {
+                params.push(("inputCaptcha", &ans_str));
+            }
 
             // Pipeline: start fetching the NEXT captcha image while submitting
             // the current API request. This overlaps one network RTT with the
@@ -653,12 +641,7 @@ impl ApiClient {
 
             let data: serde_json::Value = match resp.json().await {
                 Ok(d) => d,
-                Err(e) => {
-                    self.dbg(
-                        "WARN",
-                        &format!("[{}] JSON parse failed: {} — invalidating session", label, e),
-                        None,
-                    );
+                Err(_) => {
                     self.invalidate_session().await;
                     client = self.get_client().await;
                     needs_captcha = self.check_captcha_required(&client).await;
@@ -799,13 +782,12 @@ impl ApiClient {
         if Self::is_waitlisted_json(&raw) {
             progress("Waitlist detected! Fetching confirmation probability...");
             let (pred_result, _) = self
-                .run_fetch_loop(needs_captcha, "PNRPrediction", Some(pnr), &progress, None)
+                .run_fetch_loop(needs_captcha, "PNRPrediction", None, &progress, None)
                 .await;
-            if let Some(p_data) = pred_result {
-                if p_data.get("__error__").is_none() {
+            if let Some(p_data) = pred_result
+                && p_data.get("__error__").is_none() {
                     prediction = Some(p_data);
                 }
-            }
         }
 
         let elapsed = t_start.elapsed().as_secs_f64();
