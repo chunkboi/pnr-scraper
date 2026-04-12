@@ -1,6 +1,6 @@
 [package]
 name = "pnr-scraper"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 description = "Indian Railways PNR Status Checker"
 
