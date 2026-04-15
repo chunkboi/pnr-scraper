@@ -4,6 +4,7 @@ use regex::Regex;
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::{LazyLock, OnceLock};
+use std::simd::prelude::*;
 use tesseract_plumbing::TessBaseApi;
 use tokio::sync::{mpsc, oneshot};
 
@@ -173,13 +174,26 @@ fn sharpen(img: &GrayImage) -> GrayImage {
 }
 
 fn binarize(img: &GrayImage, threshold: u8) -> GrayImage {
-    ImageBuffer::from_fn(img.width(), img.height(), |x, y| {
-        if img.get_pixel(x, y).0[0] < threshold {
-            Luma([0])
-        } else {
-            Luma([255])
-        }
-    })
+    let (w, h) = img.dimensions();
+    let mut out = GrayImage::new(w, h);
+    let pixels = img.as_raw();
+    let out_pixels = out.as_mut();
+
+    let threshold_simd = u8x32::splat(threshold);
+    let zero_simd = u8x32::splat(0);
+    let full_simd = u8x32::splat(255);
+
+    // Image is 80x30 (upscaled x3 = 240x90). 240 * 90 = 21600 pixels.
+    // 21600 is exactly divisible by 32 (675 iterations).
+    // Manual SIMD processing replaces 21,600 branchy "if" statements
+    // with 675 parallel register operations.
+    for i in (0..pixels.len()).step_by(32) {
+        let chunk = u8x32::from_slice(&pixels[i..i + 32]);
+        let mask = chunk.simd_ge(threshold_simd);
+        let result = mask.select(full_simd, zero_simd);
+        result.copy_to_slice(&mut out_pixels[i..i + 32]);
+    }
+    out
 }
 
 fn preprocess_base(img: &DynamicImage) -> GrayImage {

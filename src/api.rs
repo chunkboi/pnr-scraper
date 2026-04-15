@@ -10,8 +10,9 @@ use reqwest::header::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::net::SocketAddr;
 use std::sync::{Arc, LazyLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 const PNR_PAGE: &str = "https://www.indianrail.gov.in/enquiry/PNR/PnrEnquiry.html?locale=en";
@@ -95,6 +96,8 @@ struct AppState {
     ua: String,
     /// Mirrors what is in `jar`; used only for disk serialisation.
     cookies: HashMap<String, String>,
+    /// One-time DNS resolution result to bypass redundant lookups.
+    resolved_ip: Option<SocketAddr>,
 }
 
 pub struct ApiClient {
@@ -116,6 +119,7 @@ impl ApiClient {
             session_ts: 0.0,
             ua: get_latest_user_agent().await,
             cookies: HashMap::new(),
+            resolved_ip: None,
         };
 
         Self {
@@ -123,6 +127,22 @@ impl ApiClient {
             ocr: Arc::new(captcha::OcrHandle::new(verbose)),
             verbose,
         }
+    }
+
+    async fn refresh_dns(&self) -> Option<SocketAddr> {
+        self.dbg("SESSION", "Refreshing DNS for www.indianrail.gov.in...", None);
+        match tokio::net::lookup_host("www.indianrail.gov.in:443").await {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    self.dbg("SESSION", &format!("DNS Resolved: {}", addr), None);
+                    return Some(addr);
+                }
+            }
+            Err(e) => {
+                self.dbg("WARN", &format!("DNS resolution failed: {}", e), None);
+            }
+        }
+        None
     }
 
     // ── Logging ───────────────────────────────────────────────────────────────
@@ -142,6 +162,7 @@ impl ApiClient {
             "FLOW" => "\x1b[92m[FLOW    ]\x1b[0m",
             "WARN" => "\x1b[91m[WARN    ]\x1b[0m",
             "PERF" => "\x1b[92m[PERF    ]\x1b[0m",
+            "VERBOSE" => "\x1b[96m[VERBOSE ]\x1b[0m",
             _ => stage,
         };
         eprintln!("  \x1b[90m▸\x1b[0m {} {}{}", prefix, elapsed, msg);
@@ -152,16 +173,17 @@ impl ApiClient {
     /// Build a new `reqwest::Client` that shares the given `jar`.
     /// Called at most once per session; subsequent cookie arrivals are pushed
     /// directly into the jar so the pool stays warm.
-    fn build_client(ua: &str, jar: Arc<reqwest::cookie::Jar>) -> reqwest::Client {
+    fn build_client(
+        ua: &str,
+        jar: Arc<reqwest::cookie::Jar>,
+        resolved_ip: Option<SocketAddr>,
+    ) -> reqwest::Client {
         let mut headers = HeaderMap::new();
         // Never blindly trust disk cache. Fallback gracefully instead of panicking on invalid strings.
         let fallback_ua = HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/137.0.0.0");
         let ua_header = HeaderValue::from_str(ua).unwrap_or(fallback_ua);
         headers.insert(USER_AGENT, ua_header);
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static("*/*"),
-        );
+        headers.insert(ACCEPT, HeaderValue::from_static("*/*"));
         headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
         headers.insert(
             HeaderName::from_static("x-requested-with"),
@@ -189,14 +211,20 @@ impl ApiClient {
             HeaderValue::from_static("https://www.indianrail.gov.in"),
         );
 
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
             .default_headers(headers)
             .brotli(true)
             .gzip(true)
             .cookie_provider(jar)
-            .build()
-            .unwrap()
+            .pool_idle_timeout(Duration::from_secs(300))
+            .tcp_keepalive(Some(Duration::from_secs(60)));
+
+        if let Some(addr) = resolved_ip {
+            builder = builder.resolve("www.indianrail.gov.in", addr);
+        }
+
+        builder.build().unwrap()
     }
 
     // ── Cookie / session helpers ──────────────────────────────────────────────
@@ -291,15 +319,29 @@ impl ApiClient {
                     add_cookies_to_jar(&st.jar, &disk_cookies);
                     st.cookies = disk_cookies;
                     st.session_ts = disk_ts;
-                    let client = Self::build_client(&st.ua, Arc::clone(&st.jar));
+                    let client = Self::build_client(&st.ua, Arc::clone(&st.jar), st.resolved_ip);
                     st.client = Some(client.clone());
                     return client;
                 }
                 return st.client.as_ref().unwrap().clone();
             }
 
-        // ── Full re-init: fetch PNR page to obtain a fresh JSESSIONID ─────────
+        // ── Full re-init: resolve DNS & fetch fresh JSESSIONID ────────────────
         let t = std::time::Instant::now();
+        
+        let mut resolved_ip = {
+            let st = self.state.lock().await;
+            if let Some(ip) = st.resolved_ip {
+                self.dbg("SESSION", &format!("Reusing cached DNS: {}", ip), None);
+                Some(ip)
+            } else {
+                None
+            }
+        };
+        if resolved_ip.is_none() {
+            resolved_ip = self.refresh_dns().await;
+        }
+
         self.dbg(
             "SESSION",
             "Initialising new session (fetching PNR page for JSESSIONID)...",
@@ -312,11 +354,12 @@ impl ApiClient {
             st.client = None;
             st.session_ts = 0.0;
             st.cookies.clear();
+            st.resolved_ip = resolved_ip;
             (st.ua.clone(), Arc::clone(&st.jar))
         };
 
         // Build the init client (shares the same jar) and fetch outside the lock.
-        let init_client = Self::build_client(&ua, Arc::clone(&jar));
+        let init_client = Self::build_client(&ua, Arc::clone(&jar), resolved_ip);
         let mut new_cookies = HashMap::new();
         if let Ok(resp) = init_client.get(PNR_PAGE).send().await {
             Self::extract_cookies(resp.headers(), &mut new_cookies);
@@ -430,17 +473,13 @@ impl ApiClient {
 
     // ── Response analysis ─────────────────────────────────────────────────────
 
-    fn is_waitlisted_json(raw: &serde_json::Value) -> bool {
+    fn is_waitlisted(raw: &crate::models::RawApiResponse<'_>) -> bool {
         // (?i) flag: match case-insensitively without allocating a to_uppercase() String.
         static RE_WL: LazyLock<regex::Regex> =
             LazyLock::new(|| regex::Regex::new(r"(?i)WL|RLWL|GNWL|PQWL|TQWL").unwrap());
-        if let Some(passengers) = raw.get("passengerList").and_then(|v| v.as_array()) {
+        if let Some(passengers) = &raw.passenger_list {
             for p in passengers {
-                let status = p
-                    .get("currentStatusDetails")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| p.get("currentStatus").and_then(|v| v.as_str()))
-                    .unwrap_or("");
+                let status = p.current_status.unwrap_or("");
                 if RE_WL.is_match(status) {
                     return true;
                 }
@@ -449,96 +488,89 @@ impl ApiClient {
         false
     }
 
-    fn jval(v: &serde_json::Value, key: &str) -> String {
-        match v.get(key) {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Number(n)) => n.to_string(),
-            _ => String::new(),
-        }
-    }
-
-    fn map_response_json(raw: &serde_json::Value) -> MappedResponse {
+    fn map_response(raw: &crate::models::RawApiResponse<'_>) -> MappedResponse {
         let passengers = raw
-            .get("passengerList")
-            .and_then(|v| v.as_array())
+            .passenger_list
+            .as_ref()
             .map(|pl| {
                 pl.iter()
                     .map(|p| {
-                        let book = match p.get("bookingStatusDetails").and_then(|v| v.as_str()) {
+                        let book = match p.booking_status_details {
                             Some(s) if !s.is_empty() => s.to_string(),
                             _ => {
                                 let combined = format!(
                                     "{}/{}",
-                                    Self::jval(p, "bookingStatus"),
-                                    Self::jval(p, "bookingBerthNo")
+                                    p.booking_status.unwrap_or(""),
+                                    p.booking_berth_no.as_ref().map(|s| s.to_string()).unwrap_or_default()
                                 );
                                 combined.trim_end_matches('/').to_string()
                             }
                         };
-                        let mut curr = match p.get("currentStatusDetails").and_then(|v| v.as_str())
-                        {
+                        let mut curr = match p.current_status_details {
                             Some(s) if !s.is_empty() => s.to_string(),
                             _ => {
                                 let combined = format!(
                                     "{}/{}",
-                                    Self::jval(p, "currentStatus"),
-                                    Self::jval(p, "currentBerthNo")
+                                    p.current_status.unwrap_or(""),
+                                    p.current_berth_no.as_ref().map(|s| s.to_string()).unwrap_or_default()
                                 );
                                 combined.trim_end_matches('/').to_string()
                             }
                         };
-                        let coach = Self::jval(p, "currentCoachId");
+                        let coach = p.current_coach_id.as_ref().map(|s| s.to_string()).unwrap_or_default();
                         if !coach.is_empty() {
                             curr = format!("{}/{}", coach, curr);
                         }
-                        let serial = match p.get("passengerSerialNumber") {
-                            Some(serde_json::Value::Number(n)) => n.to_string(),
-                            Some(serde_json::Value::String(s)) => s.clone(),
-                            _ => String::new(),
-                        };
+                        let serial = p.passenger_serial_number.as_ref().map(|s| s.to_string().into_owned()).unwrap_or_default();
+                        let quota = p.passenger_quota.unwrap_or("").to_string();
+
                         MappedPassenger {
                             serial,
                             booking_status: book,
                             current_status: curr,
-                            coach_position: coach,
+                            coach_position: coach.into_owned(),
+                            quota,
                         }
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        let mut chart_status = Self::jval(raw, "chartStatus");
+        let mut chart_status = raw.chart_status.unwrap_or("").to_string();
         if chart_status.is_empty() {
             chart_status = "-".to_string();
         }
-        if let Some(msgs) = raw.get("informationMessage").and_then(|v| v.as_array()) {
+        if let Some(msgs) = &raw.information_message {
             let valid_msgs: Vec<&str> = msgs
                 .iter()
-                .filter_map(|m| m.as_str())
                 .filter(|s| !s.is_empty())
+                .cloned()
                 .collect();
             if !valid_msgs.is_empty() {
                 chart_status = format!("{} | {}", chart_status, valid_msgs.join(" | "));
             }
         }
 
+        let generated_at = raw.generated_time_stamp.as_ref().map(crate::ui::parse_ts_from_raw).unwrap_or_else(|| "-".to_string());
+
         MappedResponse {
-            pnr: Self::jval(raw, "pnrNumber"),
+            pnr: raw.pnr_number.as_ref().map(|s| s.to_string().into_owned()).unwrap_or_default(),
             journey: JourneyInfo {
-                train_number: Self::jval(raw, "trainNumber"),
-                train_name: Self::jval(raw, "trainName"),
-                boarding_date: Self::jval(raw, "dateOfJourney"),
-                from: Self::jval(raw, "sourceStation"),
-                to: Self::jval(raw, "destinationStation"),
-                reserved_upto: Self::jval(raw, "reservationUpto"),
-                boarding_point: Self::jval(raw, "boardingPoint"),
-                class: Self::jval(raw, "journeyClass"),
+                train_number: raw.train_number.as_ref().map(|s| s.to_string().into_owned()).unwrap_or_default(),
+                train_name: raw.train_name.unwrap_or("").to_string(),
+                boarding_date: raw.date_of_journey.unwrap_or("").to_string(),
+                from: raw.source_station.unwrap_or("").to_string(),
+                to: raw.destination_station.unwrap_or("").to_string(),
+                reserved_upto: raw.reservation_upto.unwrap_or("").to_string(),
+                boarding_point: raw.boarding_point.unwrap_or("").to_string(),
+                class: raw.journey_class.unwrap_or("").to_string(),
             },
             passengers,
             fare: FareInfo {
-                total_fare: crate::ui::extract_fare(raw),
+                total_fare: crate::ui::extract_fare_from_raw(raw),
                 charting_status: chart_status,
             },
+            generated_at,
         }
     }
 
@@ -551,7 +583,7 @@ impl ApiClient {
         pnr_number: Option<&str>,
         progress: &F,
         prefetched_img: Option<Bytes>,
-    ) -> (Option<serde_json::Value>, bool)
+    ) -> (Option<Result<Bytes, String>>, bool)
     where
         F: Fn(&str),
     {
@@ -565,7 +597,7 @@ impl ApiClient {
         let mut client = self.get_client().await;
 
         for attempt in 1..=MAX_CAPTCHA_RETRIES {
-            let t_attempt = std::time::Instant::now();
+            let _t_attempt = std::time::Instant::now();
 
             let mut captcha_answer: Option<String> = None;
             if needs_captcha {
@@ -614,15 +646,17 @@ impl ApiClient {
             params.push(("facnam", input_page));
             params.push(("language", "en"));
 
-            // Pipeline: start fetching the NEXT captcha image while submitting
-            // the current API request. This overlaps one network RTT with the
-            // API round-trip, saving ~100-300ms per retry.
-            let next_captcha_fut = if needs_captcha && attempt < MAX_CAPTCHA_RETRIES {
-                let c = client.clone();
-                Some(self.fetch_captcha_owned(c))
-            } else {
-                None
-            };
+            // Race Condition Fix: We no longer pre-fetch the NEXT captcha 
+            // while submitting the current one. This ensures the current
+            // submission isn't invalidated by a new captcha request.
+
+            if self.verbose {
+                let mut url = format!("{}?", API_URL);
+                for (k, v) in &params {
+                    url.push_str(&format!("{}={}&", k, v));
+                }
+                self.dbg("VERBOSE", &format!("Submitting: {}", url.trim_end_matches('&')), None);
+            }
 
             let t_req = std::time::Instant::now();
             let resp = match client.get(API_URL).query(&params).send().await {
@@ -630,9 +664,13 @@ impl ApiClient {
                 Err(e) => {
                     self.dbg(
                         "WARN",
-                        &format!("[{}] API call failed: {} — invalidating session", label, e),
+                        &format!("[{}] API call failed: {} — possible IP rotation, refreshing DNS", label, e),
                         None,
                     );
+                    {
+                        let mut st = self.state.lock().await;
+                        st.resolved_ip = None; // Force refresh on next get_client
+                    }
                     self.invalidate_session().await;
                     client = self.get_client().await;
                     needs_captcha = self.check_captcha_required(&client).await;
@@ -644,6 +682,11 @@ impl ApiClient {
             {
                 let mut new_cookies = HashMap::new();
                 if Self::extract_cookies(resp.headers(), &mut new_cookies) {
+                    if self.verbose {
+                        for (k, v) in &new_cookies {
+                            self.dbg("VERBOSE", &format!("Set-Cookie: {}={}", k, v), None);
+                        }
+                    }
                     let mut st = self.state.lock().await;
                     add_cookies_to_jar(&st.jar, &new_cookies);
                     st.cookies.extend(new_cookies);
@@ -651,7 +694,15 @@ impl ApiClient {
                 }
             }
 
-            let data: serde_json::Value = match resp.json().await {
+            let body_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    self.dbg("WARN", &format!("[{}] Bytes fetch failed: {}", label, e), None);
+                    continue;
+                }
+            };
+
+            let data: crate::models::RawApiResponse = match serde_json::from_slice(&body_bytes) {
                 Ok(d) => d,
                 Err(e) => {
                     self.dbg(
@@ -659,6 +710,10 @@ impl ApiClient {
                         &format!("[{}] JSON parse failed: {} — invalidating session", label, e),
                         None,
                     );
+                    if self.verbose {
+                        let snippet = String::from_utf8_lossy(&body_bytes);
+                        eprintln!("  \x1b[90m▸\x1b[0m \x1b[91m[DIAGNOSTIC]\x1b[0m Raw Response Snippet: {}", snippet.chars().take(1000).collect::<String>());
+                    }
                     self.invalidate_session().await;
                     client = self.get_client().await;
                     needs_captcha = self.check_captcha_required(&client).await;
@@ -669,82 +724,52 @@ impl ApiClient {
             self.dbg(
                 "API",
                 &format!(
-                    "Response ({:?}) ({}ms)",
-                    data.get("flag"),
+                    "Response (flag={:?}) ({}ms)",
+                    data.flag,
                     t_req.elapsed().as_millis()
                 ),
                 None,
             );
 
-            let err_msg = data
-                .get("errorMessage")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
+            if self.verbose {
+                let snippet = String::from_utf8_lossy(&body_bytes);
+                self.dbg("VERBOSE", &format!("Raw Response: {}", snippet), None);
+            }
+
+            let err_msg = data.error_message.unwrap_or("");
 
             if err_msg == "Session out or Invalid Request" {
-                self.dbg(
-                    "WARN",
-                    &format!(
-                        "[{}] Session expired on server — purging & auto-reinitialising",
-                        label
-                    ),
-                    None,
-                );
+                self.dbg("WARN", &format!("[{}] Session expired on server", label), None);
                 self.invalidate_session().await;
                 client = self.get_client().await;
                 needs_captcha = self.check_captcha_required(&client).await;
                 continue;
             }
 
-            if err_msg.contains("Captcha")
-                || data.get("flag").and_then(|f| f.as_str()) == Some("NO")
-            {
+            if err_msg.contains("Captcha") || data.flag == Some("NO") {
+                self.dbg("WARN", &format!("[{}] Server rejected captcha: \"{}\" — retrying...", label, err_msg), None);
                 if !needs_captcha {
-                    progress(&format!(
-                        "[{}] Server requested captcha unexpectedly, enabling...",
-                        label
-                    ));
+                    progress(&format!("[{}] Server requested captcha unexpectedly", label));
                     needs_captcha = true;
                 }
-                // Await the prefetched next captcha if we started one
-                if let Some(fut) = next_captcha_fut {
-                    current_img = fut.await;
-                }
+                // Fetch the new captcha image ONLY after the current attempt has failed.
+                current_img = None; // Reset so next loop fetches fresh
                 continue;
             }
 
             if !err_msg.is_empty() {
-                let mut err_map = serde_json::Map::new();
-                err_map.insert(
-                    "__error__".into(),
-                    serde_json::Value::String(err_msg.to_string()),
-                );
-                return (Some(serde_json::Value::Object(err_map)), needs_captcha);
+                return (Some(Err(err_msg.to_string())), needs_captcha);
             }
 
-            self.dbg(
-                "FLOW",
-                &format!(
-                    "[{}] Success on attempt {} | total={}ms",
-                    label,
-                    attempt,
-                    t_attempt.elapsed().as_millis()
-                ),
-                None,
-            );
-            return (Some(data), needs_captcha);
+            self.dbg("FLOW", &format!("[{}] Success on attempt {}", label, attempt), None);
+            
+            return (Some(Ok(body_bytes)), needs_captcha);
         }
 
         (None, needs_captcha)
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
-
-    /// Owned-client variant for pipelined prefetch — avoids lifetime issues
-    /// when the future outlives the borrow of `&client`.
-    async fn fetch_captcha_owned(&self, client: reqwest::Client) -> Option<Bytes> {
-        self.fetch_captcha(&client).await
-    }
 
     pub async fn get_pnr_status<F>(&self, pnr: &str, progress: F) -> PnrResult
     where
@@ -753,21 +778,54 @@ impl ApiClient {
         let t_start = std::time::Instant::now();
         let client = self.get_client().await;
 
-        // Speculative parallel fetch: check captcha config AND fetch the image
-        // concurrently. Since captcha is required ~99% of the time, we almost
-        // never waste the image fetch — but we save one full RTT (~100-300ms).
-        let (needs_captcha, speculative_img) = tokio::join!(
-            self.check_captcha_required(&client),
-            self.fetch_captcha(&client),
-        );
-        let prefetched_img = if needs_captcha { speculative_img } else { None };
+        // Speculative parallel fetch using "No Wasted Bytes" rule:
+        // Use tokio::select! to start both the config check and image fetch.
+        // If config returns 'not required' first, we drop the image fetch immediately.
+        let mut speculative_img = None;
+        let mut fetch_fut = std::pin::pin!(self.fetch_captcha(&client));
+        
+        self.dbg("SESSION", "Speculative captcha pre-load started...", None);
+        let needs_captcha = tokio::select! {
+            required = self.check_captcha_required(&client) => {
+                self.dbg("SESSION", "Captcha check finished faster than pre-load.", None);
+                required
+            },
+            img = &mut fetch_fut => {
+                self.dbg("SESSION", "Pre-load finished faster than captcha check.", None);
+                speculative_img = img;
+                self.check_captcha_required(&client).await
+            }
+        };
+        
+        let prefetched_img = if needs_captcha {
+            if speculative_img.is_some() {
+                self.dbg("SESSION", "Using pre-loaded captcha image.", None);
+                speculative_img
+            } else {
+                self.dbg("SESSION", "Waiting for pre-load to finish...", None);
+                fetch_fut.await
+            }
+        } else {
+            self.dbg("SESSION", "Dropping pre-loaded image — captcha not required.", None);
+            None
+        };
 
         let (result, needs_captcha) = self
             .run_fetch_loop(needs_captcha, "PNR", Some(pnr), &progress, prefetched_img)
             .await;
 
-        let raw = match result {
-            Some(value) => value,
+        let raw_bytes = match result {
+            Some(Ok(bytes)) => bytes,
+            Some(Err(err)) => {
+                return PnrResult {
+                    success: false,
+                    error: Some(err),
+                    raw: None,
+                    mapped: None,
+                    prediction: None,
+                    elapsed: t_start.elapsed().as_secs_f64(),
+                };
+            }
             None => {
                 return PnrResult {
                     success: false,
@@ -782,42 +840,44 @@ impl ApiClient {
                 };
             }
         };
-        if let Some(err) = raw.get("__error__").and_then(|v| v.as_str()) {
-            return PnrResult {
-                success: false,
-                error: Some(err.to_string()),
-                raw: None,
-                mapped: None,
-                prediction: None,
-                elapsed: t_start.elapsed().as_secs_f64(),
-            };
-        }
 
-        let mapped = Self::map_response_json(&raw);
+        // ZERO-ALLOCATION PARSING: Borrow strings directly from raw_bytes.
+        let raw_api: crate::models::RawApiResponse = match serde_json::from_slice(&raw_bytes) {
+            Ok(d) => d,
+            Err(e) => {
+                return PnrResult {
+                    success: false,
+                    error: Some(format!("Failed to parse API response: {}", e)),
+                    raw: None,
+                    mapped: None,
+                    prediction: None,
+                    elapsed: t_start.elapsed().as_secs_f64(),
+                };
+            }
+        };
+
+        let mapped = Self::map_response(&raw_api);
 
         let mut prediction = None;
-        if Self::is_waitlisted_json(&raw) {
+        if Self::is_waitlisted(&raw_api) {
             progress("Waitlist detected! Fetching confirmation probability...");
-            let (pred_result, _) = self
-                .run_fetch_loop(needs_captcha, "PNRPrediction", Some(pnr), &progress, None)
+            let (p_res, _) = self
+                .run_fetch_loop(needs_captcha, "Prediction", None, &progress, None)
                 .await;
-            if let Some(p_data) = pred_result {
-                if p_data.get("__error__").is_none() {
-                    prediction = Some(p_data);
-                }
+            if let Some(Ok(p_bytes)) = p_res {
+                prediction = Some(serde_json::from_slice(&p_bytes).unwrap_or(serde_json::Value::Null));
             }
         }
 
-        let elapsed = t_start.elapsed().as_secs_f64();
-        progress(&format!("Status fetch complete in {:.2}s.", elapsed));
+        let full_raw: serde_json::Value = serde_json::from_slice(&raw_bytes).unwrap_or(serde_json::Value::Null);
 
         PnrResult {
             success: true,
             error: None,
-            raw: Some(raw),
+            raw: Some(full_raw),
             mapped: Some(mapped),
             prediction,
-            elapsed,
+            elapsed: t_start.elapsed().as_secs_f64(),
         }
     }
 }

@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 mod api;
 mod captcha;
 mod models;
@@ -103,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    ui::display(&raw, result.elapsed, pred);
+    ui::display(&mapped, result.elapsed, pred);
 
     if let Some(export_path) = args.export {
         let mut out_data = serde_json::Map::new();
