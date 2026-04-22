@@ -26,6 +26,8 @@ dependencies** beyond standard Windows system DLLs.
 - **JSON export** — optionally writes structured output to a `.json` file
 - **Single binary** — everything (Tesseract model, OCR engine, TLS, HTTP
   client) is statically linked; copy `pnr-scraper.exe` anywhere and it works
+  *(see portability note in Quick Start if you need to distribute the binary to
+  other machines)*
 
 ---
 
@@ -40,7 +42,8 @@ dependencies** beyond standard Windows system DLLs.
 
 > **Note:** You only need Rust/MSVC/Git to *build* the project. The compiled
 > `pnr-scraper.exe` binary runs on any 64-bit Windows machine with no extra
-> software installed.
+> software installed, provided it was built without `target-cpu=native` (see
+> portability note below).
 
 ---
 
@@ -78,6 +81,16 @@ cargo build --release
 ```
 
 The finished binary is at `target\release\pnr-scraper.exe`.
+
+> **⚠ Portability note:** The default `.cargo/config.toml` sets
+> `-C target-cpu=native`, optimising for *your* CPU's instruction set
+> (AVX2, SSE4.2, …). The resulting binary **will not run on older or different
+> CPU models**. To produce a generic, portable binary, comment out the
+> `rustflags` block in `.cargo/config.toml` before building:
+> ```toml
+> # [target.'cfg(target_arch = "x86_64")']
+> # rustflags = ["-C", "target-cpu=native"]
+> ```
 
 ---
 
@@ -150,9 +163,11 @@ pnr-scraper.exe --pnr 1234567890 --show-json --verbose
 ### Captcha solving pipeline
 
 The Indian Railways enquiry portal protects its API with an arithmetic image
-captcha (e.g. `47 + 23`). The solver:
+captcha (e.g. `47 + 23`). On startup, the captcha-required check and the first
+image download are issued **concurrently** (`tokio::join!`) so no sequential
+round-trip is wasted. The solver then:
 
-1. **Fetches** the PNG captcha image over HTTPS
+1. **Receives** the pre-fetched PNG captcha image
 2. **Preprocesses** the image:
    - Alpha-composite over white background
    - Auto-invert if the image is dark-on-light
@@ -160,10 +175,15 @@ captcha (e.g. `47 + 23`). The solver:
    - Median filter (noise removal) → contrast enhancement → unsharp mask
 3. **Binarizes** with a fast threshold (128) and tries OCR immediately
 4. If the fast path fails, tries two fallback thresholds (110, 150) sequentially
-5. **OCR** is performed by a thread-local Tesseract 5 instance (initialised once
-   per thread; `eng.traineddata` is embedded in the binary and extracted to a
-   temp directory on first run)
+5. **OCR** is performed by a single `OcrHandle` (a RAII wrapper around
+   Tesseract 5) initialised once when `ApiClient` is constructed and shared
+   across tasks via `Arc`. `eng.traineddata` is embedded in the binary at
+   compile time and extracted atomically to a temp directory on first run.
 6. **Evaluates** the parsed arithmetic expression and submits the answer
+7. **Pipelining** — while the API request is in-flight, the next captcha image
+   is fetched in the background (`fetch_captcha_owned`). On a retry this
+   pre-fetched image is used immediately, saving one full network round-trip
+   (~100–300 ms per retry).
 
 ### Session management
 
@@ -173,6 +193,8 @@ captcha (e.g. `47 + 23`). The solver:
   runs within the TTL window (default 5 minutes)
 - If the server returns `"Session out or Invalid Request"`, the session is
   automatically purged and re-initialised
+- Disk write failures (session cache, UA cache) are surfaced as visible
+  `[WARN]` lines rather than silently discarded
 
 ### Static binary
 
@@ -191,13 +213,13 @@ pnr-scraper/
 ├── src/
 │   ├── main.rs       # CLI argument parsing, top-level orchestration
 │   ├── api.rs        # HTTP client, session management, fetch-retry loop
-│   ├── captcha.rs    # Image preprocessing, OCR pipeline, captcha solver
+│   ├── captcha.rs    # OcrHandle (RAII), image preprocessing, captcha solver
 │   ├── ui.rs         # Terminal display, colour-coded output
 │   └── models.rs     # Shared data types (PnrResult, SessionCache, …)
-├── tessdata/
-│   └── eng.traineddata   # Tesseract English model (embedded into binary)
+├── tessdata/              # ⚠ gitignored — created at build time
+│   └── eng.traineddata   # Tesseract English model (embedded into binary at compile time)
 ├── .cargo/
-│   └── config.toml   # VCPKGRS_TRIPLET + VCPKG_ROOT (relative path)
+│   └── config.toml   # VCPKGRS_TRIPLET + VCPKG_ROOT + target-cpu flag (relative path)
 ├── setup.ps1         # One-time vcpkg bootstrap script
 ├── Cargo.toml
 └── Cargo.lock
@@ -209,7 +231,8 @@ pnr-scraper/
 
 ### Why vcpkg?
 
-`leptonica-sys` and `tesseract-sys` (the Rust FFI crates) use the
+`leptonica-sys` and `tesseract-sys` (the Rust FFI crates used by
+`tesseract-plumbing`) use the
 [vcpkg crate](https://crates.io/crates/vcpkg) to locate native libraries at
 build time. `setup.ps1` installs those libraries with the
 `x64-windows-static-md` triplet so they link statically into the final binary.
@@ -220,10 +243,21 @@ build time. `setup.ps1` installs those libraries with the
 [env]
 VCPKGRS_TRIPLET = "x64-windows-static-md"
 VCPKG_ROOT      = { value = "vcpkg_tools", relative = true }
+
+# Enable native CPU instruction set (AVX2, SSE4.2, etc.) for auto-
+# vectorisation of pixel processing loops. Only safe when you build
+# and run on the same machine — comment this out for a portable binary.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=native"]
 ```
 
 `VCPKG_ROOT` uses Cargo's `relative = true` feature, so it resolves to
 `<repo_root>/vcpkg_tools` regardless of where you clone the repository.
+
+`target-cpu=native` enables AVX2/SSE4.2 auto-vectorisation for the
+pixel-processing loops in the captcha pipeline. Remove or comment out that
+block if you need the binary to run on machines other than the one it was built
+on.
 
 ### Rebuilding after a `cargo clean`
 
