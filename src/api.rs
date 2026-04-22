@@ -4,6 +4,7 @@ use crate::models::{
     UaCache,
 };
 use bytes::Bytes;
+use colored::Colorize;
 use reqwest::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, ACCEPT_ENCODING, ACCEPT_LANGUAGE, ORIGIN, REFERER,
     SET_COOKIE, USER_AGENT,
@@ -34,20 +35,29 @@ static BASE_URL: LazyLock<reqwest::Url> =
 fn now_sec() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs_f64()
 }
 
+fn cache_dir() -> PathBuf {
+    let base = dirs::cache_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    base.join("pnr-scraper")
+}
+
+fn ensure_cache_dir() {
+    let dir = cache_dir();
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+}
+
 fn session_file() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pnr_session.json")
+    cache_dir().join("session.json")
 }
 
 fn ua_file() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pnr_ua_cache.json")
+    cache_dir().join("ua_cache.json")
 }
 
 /// Insert every entry from `cookies` into `jar` without rebuilding the client.
@@ -73,10 +83,11 @@ async fn get_latest_user_agent() -> String {
         ua: ua.clone(),
         ts: now_sec(),
     };
+    ensure_cache_dir();
     if let Err(e) = std::fs::write(&path, serde_json::to_string(&cache).unwrap()) {
         eprintln!(
-            "  \x1b[90m▸\x1b[0m \x1b[91m[WARN    ]\x1b[0m Failed to cache User-Agent to disk: {}",
-            e
+            "  {} {} Failed to cache User-Agent to disk: {}",
+            "▸".bright_black(), "[WARN    ]".bright_red(), e
         );
     }
     ua
@@ -152,20 +163,20 @@ impl ApiClient {
             return;
         }
         let elapsed = match t_start {
-            Some(t) => format!("\x1b[90m+{:<5.3}s\x1b[0m ", t.elapsed().as_secs_f64()),
+            Some(t) => format!("+{:<5.3}s ", t.elapsed().as_secs_f64()).bright_black().to_string(),
             None => String::new(),
         };
         let prefix = match stage {
-            "SESSION" => "\x1b[94m[SESSION ]\x1b[0m",
-            "CAPTCHA" => "\x1b[93m[CAPTCHA ]\x1b[0m",
-            "API" => "\x1b[95m[API     ]\x1b[0m",
-            "FLOW" => "\x1b[92m[FLOW    ]\x1b[0m",
-            "WARN" => "\x1b[91m[WARN    ]\x1b[0m",
-            "PERF" => "\x1b[92m[PERF    ]\x1b[0m",
-            "VERBOSE" => "\x1b[96m[VERBOSE ]\x1b[0m",
-            _ => stage,
+            "SESSION" => "[SESSION ]".bright_blue().to_string(),
+            "CAPTCHA" => "[CAPTCHA ]".bright_yellow().to_string(),
+            "API"     => "[API     ]".bright_magenta().to_string(),
+            "FLOW"    => "[FLOW    ]".bright_green().to_string(),
+            "WARN"    => "[WARN    ]".bright_red().to_string(),
+            "PERF"    => "[PERF    ]".bright_green().to_string(),
+            "VERBOSE" => "[VERBOSE ]".bright_cyan().to_string(),
+            _ => stage.to_string(),
         };
-        eprintln!("  \x1b[90m▸\x1b[0m {} {}{}", prefix, elapsed, msg);
+        eprintln!("  {} {} {}{}", "▸".bright_black(), prefix, elapsed, msg);
     }
 
     // ── Client construction ───────────────────────────────────────────────────
@@ -254,11 +265,12 @@ impl ApiClient {
                 .collect(),
             ts,
         };
+        ensure_cache_dir();
         if let Ok(data) = serde_json::to_string(&cache)
             && let Err(e) = std::fs::write(&path, data) {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[91m[WARN    ]\x1b[0m Failed to save session cookies to disk: {}",
-                    e
+                    "  {} {} Failed to save session cookies to disk: {}",
+                    "▸".bright_black(), "[WARN    ]".bright_red(), e
                 );
             }
     }
@@ -501,7 +513,7 @@ impl ApiClient {
                                 let combined = format!(
                                     "{}/{}",
                                     p.booking_status.unwrap_or(""),
-                                    p.booking_berth_no.as_ref().map(|s| s.to_string()).unwrap_or_default()
+                                    p.booking_berth_no.as_ref().map(|s| s.as_cow()).unwrap_or_default()
                                 );
                                 combined.trim_end_matches('/').to_string()
                             }
@@ -512,16 +524,16 @@ impl ApiClient {
                                 let combined = format!(
                                     "{}/{}",
                                     p.current_status.unwrap_or(""),
-                                    p.current_berth_no.as_ref().map(|s| s.to_string()).unwrap_or_default()
+                                    p.current_berth_no.as_ref().map(|s| s.as_cow()).unwrap_or_default()
                                 );
                                 combined.trim_end_matches('/').to_string()
                             }
                         };
-                        let coach = p.current_coach_id.as_ref().map(|s| s.to_string()).unwrap_or_default();
+                        let coach = p.current_coach_id.as_ref().map(|s| s.as_cow()).unwrap_or_default();
                         if !coach.is_empty() {
                             curr = format!("{}/{}", coach, curr);
                         }
-                        let serial = p.passenger_serial_number.as_ref().map(|s| s.to_string().into_owned()).unwrap_or_default();
+                        let serial = p.passenger_serial_number.as_ref().map(|s| s.as_cow().into_owned()).unwrap_or_default();
                         let quota = p.passenger_quota.unwrap_or("").to_string();
 
                         MappedPassenger {
@@ -554,9 +566,9 @@ impl ApiClient {
         let generated_at = raw.generated_time_stamp.as_ref().map(crate::ui::parse_ts_from_raw).unwrap_or_else(|| "-".to_string());
 
         MappedResponse {
-            pnr: raw.pnr_number.as_ref().map(|s| s.to_string().into_owned()).unwrap_or_default(),
+            pnr: raw.pnr_number.as_ref().map(|s| s.as_cow().into_owned()).unwrap_or_default(),
             journey: JourneyInfo {
-                train_number: raw.train_number.as_ref().map(|s| s.to_string().into_owned()).unwrap_or_default(),
+                train_number: raw.train_number.as_ref().map(|s| s.as_cow().into_owned()).unwrap_or_default(),
                 train_name: raw.train_name.unwrap_or("").to_string(),
                 boarding_date: raw.date_of_journey.unwrap_or("").to_string(),
                 from: raw.source_station.unwrap_or("").to_string(),
@@ -583,7 +595,7 @@ impl ApiClient {
         pnr_number: Option<&str>,
         progress: &F,
         prefetched_img: Option<Bytes>,
-    ) -> (Option<Result<Bytes, String>>, bool)
+    ) -> (Option<Result<(Bytes, serde_json::Value), String>>, bool)
     where
         F: Fn(&str),
     {
@@ -597,7 +609,7 @@ impl ApiClient {
         let mut client = self.get_client().await;
 
         for attempt in 1..=MAX_CAPTCHA_RETRIES {
-            let _t_attempt = std::time::Instant::now();
+
 
             let mut captcha_answer: Option<String> = None;
             if needs_captcha {
@@ -702,7 +714,7 @@ impl ApiClient {
                 }
             };
 
-            let data: crate::models::RawApiResponse = match serde_json::from_slice(&body_bytes) {
+            let data: serde_json::Value = match serde_json::from_slice(&body_bytes) {
                 Ok(d) => d,
                 Err(e) => {
                     self.dbg(
@@ -712,7 +724,7 @@ impl ApiClient {
                     );
                     if self.verbose {
                         let snippet = String::from_utf8_lossy(&body_bytes);
-                        eprintln!("  \x1b[90m▸\x1b[0m \x1b[91m[DIAGNOSTIC]\x1b[0m Raw Response Snippet: {}", snippet.chars().take(1000).collect::<String>());
+                        eprintln!("  {} {} Raw Response Snippet: {}", "▸".bright_black(), "[DIAGNOSTIC]".bright_red(), snippet.chars().take(1000).collect::<String>());
                     }
                     self.invalidate_session().await;
                     client = self.get_client().await;
@@ -721,11 +733,13 @@ impl ApiClient {
                 }
             };
 
+            let flag = data.get("flag").and_then(|v| v.as_str());
+
             self.dbg(
                 "API",
                 &format!(
                     "Response (flag={:?}) ({}ms)",
-                    data.flag,
+                    flag,
                     t_req.elapsed().as_millis()
                 ),
                 None,
@@ -736,7 +750,7 @@ impl ApiClient {
                 self.dbg("VERBOSE", &format!("Raw Response: {}", snippet), None);
             }
 
-            let err_msg = data.error_message.unwrap_or("");
+            let err_msg = data.get("errorMessage").and_then(|v| v.as_str()).unwrap_or("");
 
             if err_msg == "Session out or Invalid Request" {
                 self.dbg("WARN", &format!("[{}] Session expired on server", label), None);
@@ -746,7 +760,7 @@ impl ApiClient {
                 continue;
             }
 
-            if err_msg.contains("Captcha") || data.flag == Some("NO") {
+            if err_msg.contains("Captcha") || flag == Some("NO") {
                 self.dbg("WARN", &format!("[{}] Server rejected captcha: \"{}\" — retrying...", label, err_msg), None);
                 if !needs_captcha {
                     progress(&format!("[{}] Server requested captcha unexpectedly", label));
@@ -763,7 +777,7 @@ impl ApiClient {
 
             self.dbg("FLOW", &format!("[{}] Success on attempt {}", label, attempt), None);
             
-            return (Some(Ok(body_bytes)), needs_captcha);
+            return (Some(Ok((body_bytes, data))), needs_captcha);
         }
 
         (None, needs_captcha)
@@ -814,8 +828,8 @@ impl ApiClient {
             .run_fetch_loop(needs_captcha, "PNR", Some(pnr), &progress, prefetched_img)
             .await;
 
-        let raw_bytes = match result {
-            Some(Ok(bytes)) => bytes,
+        let (raw_bytes, full_raw) = match result {
+            Some(Ok(pair)) => pair,
             Some(Err(err)) => {
                 return PnrResult {
                     success: false,
@@ -864,12 +878,10 @@ impl ApiClient {
             let (p_res, _) = self
                 .run_fetch_loop(needs_captcha, "Prediction", None, &progress, None)
                 .await;
-            if let Some(Ok(p_bytes)) = p_res {
-                prediction = Some(serde_json::from_slice(&p_bytes).unwrap_or(serde_json::Value::Null));
+            if let Some(Ok((_p_bytes, p_value))) = p_res {
+                prediction = Some(p_value);
             }
         }
-
-        let full_raw: serde_json::Value = serde_json::from_slice(&raw_bytes).unwrap_or(serde_json::Value::Null);
 
         PnrResult {
             success: true,
@@ -881,3 +893,4 @@ impl ApiClient {
         }
     }
 }
+

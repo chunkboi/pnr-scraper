@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let mut pnr = args.pnr.clone();
+    let mut pnr = args.pnr;
     if pnr.is_none() {
         print!("{}", "Enter 10-digit PNR: ".bold());
         std::io::stdout().flush()?;
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         let mut payload = serde_json::Map::new();
         payload.insert("pnr".to_string(), raw.clone());
         if let Some(p) = pred {
-            payload.insert("prediction".to_string(), p.clone().clone());
+            payload.insert("prediction".to_string(), p.clone());
         }
         let merged = serde_json::Value::Object(payload);
         println!(
@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
             serde_json::to_value(&mapped).unwrap_or(serde_json::Value::Null),
         );
         if let Some(p) = pred {
-            out_data.insert("prediction".to_string(), p.clone().clone());
+            out_data.insert("prediction".to_string(), p.clone());
         }
 
         match serde_json::to_string_pretty(&serde_json::Value::Object(out_data)) {

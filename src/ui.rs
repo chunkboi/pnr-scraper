@@ -38,8 +38,7 @@ fn colorize_status(status: &str) -> ColoredString {
         format!("  ✓ {}  ", status).black().on_bright_green().bold()
     } else if s.contains("RAC") {
         format!("  ⚠ {}  ", status).black().on_bright_yellow().bold()
-    } else if s.contains("WL") || s.contains("WAIT") || s.contains("CAN")
-        || s.contains("RLWL") || s.contains("GNWL") || s.contains("PQWL") || s.contains("TQWL") {
+    } else if s.contains("WL") || s.contains("WAIT") || s.contains("CAN") {
         format!("  ✗ {}  ", status).white().on_bright_red().bold()
     } else {
         status.white().bold()
@@ -71,12 +70,25 @@ pub fn parse_ts_from_raw(ts: &crate::models::RawTimeStamp) -> String {
 }
 
 fn parse_jdate(val: Option<&serde_json::Value>) -> String {
-    if let Some(v) = val
-        && let Some(num) = v.as_i64()
-            && let chrono::LocalResult::Single(dt) = chrono::TimeZone::timestamp_opt(&chrono::Utc, num / 1000, 0) {
-                return dt.format("%d-%b-%Y").to_string();
-            }
-    "-".to_string()
+    let Some(v) = val else { return "-".to_string() };
+    let Some(ms) = v.as_i64() else { return "-".to_string() };
+    let secs = ms / 1000;
+    // Civil date from unix timestamp (Howard Hinnant algorithm)
+    let z = secs / 86400 + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    if (1..=12).contains(&m) {
+        format!("{:02}-{}-{}", d, MONTHS[(m as usize) - 1], y)
+    } else {
+        "-".to_string()
+    }
 }
 
 pub fn extract_fare_from_raw(v: &crate::models::RawApiResponse<'_>) -> String {
@@ -87,7 +99,7 @@ pub fn extract_fare_from_raw(v: &crate::models::RawApiResponse<'_>) -> String {
         v.fare.as_ref(),
     ];
     for val in candidates.into_iter().flatten() {
-        let s = val.to_string();
+        let s = val.as_cow();
         let trimmed = s.trim();
         if !trimmed.is_empty() && trimmed != "0" && trimmed != "0.0" && trimmed.to_lowercase() != "null" {
             return trimmed.to_string();

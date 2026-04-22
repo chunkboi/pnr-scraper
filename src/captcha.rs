@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use colored::Colorize;
 use image::{imageops::FilterType, DynamicImage, GrayImage, ImageBuffer, Luma};
 use regex::Regex;
 use std::ffi::CString;
@@ -94,11 +95,10 @@ impl Drop for OcrHandle {
     fn drop(&mut self) {
         // Drop the transmitter explicitly which unblocks the rx.blocking_recv()
         self.tx.take();
-        // Wait for the worker thread to naturally finish executing its loop
-        // and smoothly Drop the C++ engine bounds.
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        // We do NOT join() here. If Tesseract is hung in C++ FFI, join() would 
+        // deadlock the entire runtime. The thread will terminate when the 
+        // process exits.
+        self.worker.take();
     }
 }
 
@@ -187,11 +187,20 @@ fn binarize(img: &GrayImage, threshold: u8) -> GrayImage {
     // 21600 is exactly divisible by 32 (675 iterations).
     // Manual SIMD processing replaces 21,600 branchy "if" statements
     // with 675 parallel register operations.
-    for i in (0..pixels.len()).step_by(32) {
-        let chunk = u8x32::from_slice(&pixels[i..i + 32]);
-        let mask = chunk.simd_ge(threshold_simd);
+    let mut i = 0;
+    let chunks = pixels.chunks_exact(32);
+    let remainder = chunks.remainder();
+
+    for chunk in chunks {
+        let simd_chunk = u8x32::from_slice(chunk);
+        let mask = simd_chunk.simd_ge(threshold_simd);
         let result = mask.select(full_simd, zero_simd);
         result.copy_to_slice(&mut out_pixels[i..i + 32]);
+        i += 32;
+    }
+
+    for (pixel, out_pixel) in remainder.iter().zip(&mut out_pixels[i..]) {
+        *out_pixel = if *pixel >= threshold { 255 } else { 0 };
     }
     out
 }
@@ -210,9 +219,9 @@ fn preprocess_base(img: &DynamicImage) -> GrayImage {
         let inv_alpha = 255 - alpha;
 
         // Composite over white (255, 255, 255)
-        pixel.0[0] = ((r * alpha + 255 * inv_alpha) / 255) as u8;
-        pixel.0[1] = ((g * alpha + 255 * inv_alpha) / 255) as u8;
-        pixel.0[2] = ((b * alpha + 255 * inv_alpha) / 255) as u8;
+        pixel.0[0] = ((r * alpha + 255 * inv_alpha + 127) / 255) as u8;
+        pixel.0[1] = ((g * alpha + 255 * inv_alpha + 127) / 255) as u8;
+        pixel.0[2] = ((b * alpha + 255 * inv_alpha + 127) / 255) as u8;
         pixel.0[3] = 255;
     }
 
@@ -244,7 +253,6 @@ fn preprocess_base(img: &DynamicImage) -> GrayImage {
 fn ocr_in_memory(
     tess: &mut TessBaseApi,
     bin_img: &GrayImage,
-    _psm: i32,
     verbose: bool,
     label: &str,
 ) -> Option<i64> {
@@ -266,8 +274,8 @@ fn ocr_in_memory(
     ) {
         if verbose {
             eprintln!(
-                "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} tess set_image error: {:?}",
-                label, e
+                "  {} {} {} tess set_image error: {:?}",
+                "▸".bright_black(), "[OCR     ]".bright_cyan(), label, e
             );
         }
         return None;
@@ -281,8 +289,8 @@ fn ocr_in_memory(
         Err(_) => {
             if verbose {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} tess get_utf8_text error",
-                    label
+                    "  {} {} {} tess get_utf8_text error",
+                    "▸".bright_black(), "[OCR     ]".bright_cyan(), label
                 );
             }
             return None;
@@ -303,7 +311,8 @@ fn ocr_in_memory(
         };
         if verbose {
             eprintln!(
-                "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} raw={:<20} parsed={}{}{}={} ✓  ({}ms)",
+                "  {} {} {} raw={:<20} parsed={}{}{}={} ✓  ({}ms)",
+                "▸".bright_black(), "[OCR     ]".bright_cyan(),
                 label,
                 format!("{:?}", raw),
                 a,
@@ -317,7 +326,8 @@ fn ocr_in_memory(
     } else {
         if verbose {
             eprintln!(
-                "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m {} raw={:<20} no match ✗  ({}ms)",
+                "  {} {} {} raw={:<20} no match ✗  ({}ms)",
+                "▸".bright_black(), "[OCR     ]".bright_cyan(),
                 label,
                 format!("{:?}", raw),
                 elapsed_ms
@@ -335,8 +345,8 @@ fn solve_captcha_sync(tess: &mut TessBaseApi, img_bytes: &[u8], verbose: bool) -
         Err(e) => {
             if verbose {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[91m[WARN    ]\x1b[0m Failed to decode captcha image: {}",
-                    e
+                    "  {} {} Failed to decode captcha image: {}",
+                    "▸".bright_black(), "[WARN    ]".bright_red(), e
                 );
             }
             return None;
@@ -347,11 +357,11 @@ fn solve_captcha_sync(tess: &mut TessBaseApi, img_bytes: &[u8], verbose: bool) -
 
     // Fast path: threshold=128, psm=7
     let fast_bin = binarize(&base, FAST_THRESHOLD);
-    if let Some(r) = ocr_in_memory(tess, &fast_bin, 7, verbose, "fast  thresh=128") {
+    if let Some(r) = ocr_in_memory(tess, &fast_bin, verbose, "fast  thresh=128") {
         if verbose {
             eprintln!(
-                "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Solved via fast path in {}ms",
-                t_start.elapsed().as_millis()
+                "  {} {} Solved via fast path in {}ms",
+                "▸".bright_black(), "[OCR     ]".bright_cyan(), t_start.elapsed().as_millis()
             );
         }
         return Some(r);
@@ -361,11 +371,11 @@ fn solve_captcha_sync(tess: &mut TessBaseApi, img_bytes: &[u8], verbose: bool) -
     for &threshold in FALLBACK_THRESHOLDS {
         let bin = binarize(&base, threshold);
         let label = format!("grid  thresh={}", threshold);
-        if let Some(res) = ocr_in_memory(tess, &bin, 7, verbose, &label) {
+        if let Some(res) = ocr_in_memory(tess, &bin, verbose, &label) {
             if verbose {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Solved via fallback grid in {}ms",
-                    t_start.elapsed().as_millis()
+                    "  {} {} Solved via fallback grid in {}ms",
+                    "▸".bright_black(), "[OCR     ]".bright_cyan(), t_start.elapsed().as_millis()
                 );
             }
             return Some(res);
@@ -374,8 +384,8 @@ fn solve_captcha_sync(tess: &mut TessBaseApi, img_bytes: &[u8], verbose: bool) -
 
     if verbose {
         eprintln!(
-            "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m OCR completely failed ({}ms)",
-            t_start.elapsed().as_millis()
+            "  {} {} OCR completely failed ({}ms)",
+            "▸".bright_black(), "[OCR     ]".bright_cyan(), t_start.elapsed().as_millis()
         );
     }
     None
@@ -396,8 +406,8 @@ fn ensure_tessdata() -> &'static PathBuf {
         if !path.exists()
             && let Err(e) = std::fs::create_dir_all(&path) {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Failed to create tessdata dir: {}",
-                    e
+                    "  {} {} Failed to create tessdata dir: {}",
+                    "▸".bright_black(), "[OCR     ]".bright_cyan(), e
                 );
             }
 
@@ -409,23 +419,23 @@ fn ensure_tessdata() -> &'static PathBuf {
 
         if needs_write {
             eprintln!(
-                "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Extracting embedded eng.traineddata to {:?}...",
-                file_path
+                "  {} {} Extracting embedded eng.traineddata to {:?}...",
+                "▸".bright_black(), "[OCR     ]".bright_cyan(), file_path
             );
             let mut tmp_path = path.clone();
             tmp_path.push(format!("eng.traineddata.{}.tmp", std::process::id()));
             
             if let Err(e) = std::fs::write(&tmp_path, ENG_TRAINEDDATA) {
                 eprintln!(
-                    "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Failed to write tessdata to temp file: {}",
-                    e
+                    "  {} {} Failed to write tessdata to temp file: {}",
+                    "▸".bright_black(), "[OCR     ]".bright_cyan(), e
                 );
             } else {
                 // Atomic rename guarantees other processes won't read a half-written file.
                 if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
                     eprintln!(
-                        "  \x1b[90m▸\x1b[0m \x1b[96m[OCR     ]\x1b[0m Failed to atomically rename tessdata: {}",
-                        e
+                        "  {} {} Failed to atomically rename tessdata: {}",
+                        "▸".bright_black(), "[OCR     ]".bright_cyan(), e
                     );
                 }
             }

@@ -81,6 +81,7 @@ pub struct UaCache {
 // Zero-Allocation / Borrowed API models
 // =============================================================================
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawApiResponse<'a> {
@@ -149,7 +150,7 @@ pub enum MaybeNumber<'a> {
 }
 
 impl<'a> MaybeNumber<'a> {
-    pub fn to_string(&self) -> Cow<'a, str> {
+    pub fn as_cow(&self) -> Cow<'a, str> {
         match self {
             MaybeNumber::Str(s) => Cow::Borrowed(s),
             MaybeNumber::Num(n) => Cow::Owned(n.to_string()),
